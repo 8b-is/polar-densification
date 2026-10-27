@@ -5,7 +5,7 @@ Polarimetric Densification for Sony `polar-densification` (WACV 2023)
 =====================================================================
 
 Authored by **8b-is** (https://8b.is) — Visiting Sony R&D in Tokyo (through October 24th;
-WhatsApp: +1 757-614-7542 — Chris).
+Chris).
 
 Overview
 --------
