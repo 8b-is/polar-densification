@@ -138,6 +138,7 @@ class Bfp64FeatureTest(unittest.TestCase):
         packed = PolarFeatureBFP64.quantize_q16([Q16_ONE] * 4)
         self.assertEqual(len(packed.to_bytes()), 66)
         self.assertEqual(packed.count, 4)
+        self.assertAlmostEqual((64 * 4) / len(packed.to_bytes()), 3.8788, places=3)
 
     def test_serialization_roundtrip(self):
         packed = PolarFeatureBFP64.quantize_q16([Q16_ONE, -Q16_ONE // 3, 7])

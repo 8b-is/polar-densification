@@ -51,7 +51,7 @@ This module introduces four hardware-deterministic upgrades from the **8b.is** s
      initial sparse polarization SNR by **+16.8 dB to +24.5 dB** before `PCN` refinement.
 
 4. **Omni `BFP-64` & Quantum 64-Trit (`POPCNT`) Stokes Feature Kernel**:
-   - Compresses dense Stokes feature maps by `3.94x` vs FP32 (`66 bytes` per 64 elements)
+   - Compresses dense Stokes feature maps by `3.88x` vs FP32 (`66 bytes` per 64 elements)
      and executes `SNA`/`PCN` feature projections via 64-trit `POPCNT` bitplane dot products.
 """
 
@@ -559,7 +559,7 @@ class PolarFeatureBFP64:
     r"""
     Omni `BFP-64` (Block Floating-Point 64) container for dense Stokes feature maps.
     Packs 64 values into `66 bytes` (`int8` shared exponent + `uint8` valid count +
-    64 `int8` mantissas) -> `3.94x` compression vs FP32 (`256 bytes`).
+    64 `int8` mantissas) -> `3.88x` compression vs FP32 (`256 bytes`).
     """
     exponent: int
     count: int
