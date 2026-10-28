@@ -14,6 +14,7 @@ from laser_phoenix_lattice_pq import (
     Q16_ONE,
     LaserPhoenixPolarLattice,
     PolarFeatureBFP64,
+    densify_sparse_stokes_2d_phoenix_pq,
     calc_dolp_aolp_admap_pq,
     catmull_rom_pq,
     cordic_atan2_u32,
@@ -114,6 +115,38 @@ class CatmullRomTest(unittest.TestCase):
             )
             got = catmull_rom_pq(p0, p1, p2, p3, num, den)
             self.assertLess(abs(got - want), 1.0, f"t={num}/{den}")
+
+
+class DensificationMseTest(unittest.TestCase):
+    @staticmethod
+    def _smooth_field(h, w):
+        return [
+            [
+                int(round(Q16_ONE * 0.5 * math.sin(0.35 * r) + Q16_ONE * 0.4 * math.cos(0.27 * c)))
+                for c in range(w)
+            ]
+            for r in range(h)
+        ]
+
+    @staticmethod
+    def _mse(grid, truth):
+        h, w = len(truth), len(truth[0])
+        return sum((grid[r][c] - truth[r][c]) ** 2 for r in range(h) for c in range(w)) / (h * w)
+
+    def _gain(self, mask_fn):
+        truth = self._smooth_field(32, 32)
+        mask = [[mask_fn(r, c) for c in range(32)] for r in range(32)]
+        sparse = [[truth[r][c] if mask[r][c] else 0 for c in range(32)] for r in range(32)]
+        dense = densify_sparse_stokes_2d_phoenix_pq(sparse, mask)
+        return self._mse(sparse, truth) / self._mse(dense, truth)
+
+    def test_x4_2x2_superpixel_gain_exceeds_50x(self):
+        gain = self._gain(lambda r, c: r % 4 < 2 and c % 4 < 2)
+        self.assertGreater(gain, 50.0, f"measured {gain:.1f}x")
+
+    def test_x16_diagonal_anchor_gain_exceeds_20x(self):
+        gain = self._gain(lambda r, c: r % 4 == 0 and c % 4 == 0)
+        self.assertGreater(gain, 20.0, f"measured {gain:.1f}x")
 
 
 class PhiHarmonicTest(unittest.TestCase):
