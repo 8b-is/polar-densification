@@ -98,6 +98,20 @@ def clamp_int(val: int, lo: int, hi: int) -> int:
     return val
 
 
+@dataclass(frozen=True)
+class RationalPQ:
+    r"""Exact GCD-reduced rational `p/q` ("Counting Divided") value."""
+    p: int
+    q: int
+
+    def reduced(self) -> "RationalPQ":
+        if self.q == 0:
+            return RationalPQ(int(self.p), 1)
+        g = math.gcd(abs(int(self.p)), abs(int(self.q)))
+        g = g if g > 0 else 1
+        return RationalPQ(int(self.p) // g, int(self.q) // g)
+
+
 # ============================================================================
 # 2. Singularity-Free Rational `p/q` Stokes Cone & ADMap Projection
 # ============================================================================
@@ -203,10 +217,27 @@ class PhoenixPolarRelation(IntEnum):
         return (0x00000000, 0x40000000, 0x80000000, 0xC0000000, 0x00000000)[int(self)]
 
 
-# 16-stage integer CORDIC atan2 table in Z_{2^32} (where 2*pi == 2^32)
-_CORDIC_ATAN_U32: Tuple[int, ...] = tuple(
-    int(round(math.atan(2.0 ** (-i)) * (float(RING_MOD_U32) / (2.0 * math.pi))))
-    for i in range(18)
+# 18-stage precomputed integer CORDIC atan(2^-i) table in Z_{2^32} (where 2*pi == 2^32)
+# Zero floating-point operations at import time or runtime.
+_CORDIC_ATAN_U32: Tuple[int, ...] = (
+    536_870_912,
+    316_933_406,
+    167_458_907,
+    85_004_756,
+    42_667_331,
+    21_354_465,
+    10_679_838,
+    5_340_245,
+    2_670_163,
+    1_335_087,
+    667_544,
+    333_772,
+    166_886,
+    83_443,
+    41_722,
+    20_861,
+    10_430,
+    5_215,
 )
 
 
@@ -633,6 +664,152 @@ def quantum_trit_dot_q16(
 
 
 # ============================================================================
+# 5b. `8b-is/upz` 64-Byte `LitanyWireFrame` (`0x62` Gate) & `MLX-QUANT-GAIA`
+# ============================================================================
+
+UPZ_GATE_0X62: int = 0x62
+UPZ_FRAME_ABI_V1: int = 0x01
+UPZ_QUANT_QT55: int = 0x55
+UPZ_LANES_1_OF_1: int = 0x0101
+WHERE_IS_THE_LOVE_TRITS: Tuple[int, ...] = (1, 1, 1, 1, 0, 1)
+
+
+def xor_fold_u64(data: bytes) -> int:
+    r"""64-bit little-endian XOR fold matching `wupz_xor_fold` in `8b-is/upz`."""
+    acc = 0
+    n = len(data)
+    full = n & ~7
+    for i in range(0, full, 8):
+        word = int.from_bytes(data[i : i + 8], "little")
+        acc ^= word
+    for i in range(full, n):
+        acc ^= data[i]
+    return acc & 0xFFFFFFFFFFFFFFFF
+
+
+def pack_word15_to_spqt3b(word15: int) -> bytes:
+    r"""Pack a 15-bit word into a 3-byte `SPQT` (`1.585 bits/trit`, `base-243`) root."""
+    clean = int(word15) & 0x7FFF
+    out = bytearray(3)
+    for g in range(3):
+        acc = 0
+        pow3 = 1
+        for j in range(5):
+            bit = (clean >> (g * 5 + j)) & 1
+            digit = 2 if bit == 1 else 1
+            acc += digit * pow3
+            pow3 *= 3
+        out[g] = acc
+    return bytes(out)
+
+
+def pack_gaia_b158_spqt(trits: Sequence[int]) -> bytes:
+    r"""Pack balanced trits `{-1, 0, +1}` at 5 trits/byte (`base-243`, `3^5 = 243 <= 256`)."""
+    out = bytearray()
+    n = len(trits)
+    for i in range(0, n, 5):
+        chunk = trits[i : min(i + 5, n)]
+        byte_val = 0
+        pow3 = 1
+        for t in chunk:
+            digit = 0 if t < 0 else (1 if t == 0 else 2)
+            byte_val += digit * pow3
+            pow3 *= 3
+        out.append(byte_val)
+    return bytes(out)
+
+
+def quantize_groupwise_l2_ternary_pq(
+    values_q16: Sequence[int],
+) -> Tuple[Tuple[int, ...], RationalPQ]:
+    r"""
+    Zero-float `p/q` equivalent of `MLX-QUANT`'s `quantize_ternary_optimal_groupwise`:
+      1. Computes mean absolute magnitude $\mu_g = \frac{1}{N}\sum |x_i|$ in `Q16`.
+      2. Starts from L2-optimal threshold $\tau_0 = (68 \cdot \mu_g) // 100$.
+      3. Runs 2 steps of coordinate-descent Lloyd-Max refinement:
+         $\alpha_g = \frac{1}{N_{\text{nz}}}\sum_{|x_i| > \tau} |x_i|$, $\tau = \alpha_g // 2$.
+      4. Returns `(trits_tuple, RationalPQ(alpha_g, Q16_ONE).reduced())`.
+    """
+    n = len(values_q16)
+    if n == 0:
+        return (), RationalPQ(0, 1)
+    abs_vals = [abs(int(v)) for v in values_q16]
+    mean_abs = sum(abs_vals) // n
+    tau = (mean_abs * 68) // 100
+    alpha = mean_abs
+    for _ in range(2):
+        nz = [av for av in abs_vals if av > tau]
+        alpha = (sum(nz) // len(nz)) if nz else mean_abs
+        tau = alpha // 2
+    trits = tuple(
+        0 if abs(int(v)) <= tau else (1 if int(v) > 0 else -1)
+        for v in values_q16
+    )
+    return trits, RationalPQ(alpha, Q16_ONE).reduced()
+
+
+def seal_polar_litany_wire_64b(
+    raw: bytes,
+    packed: bytes,
+    gate: int = UPZ_GATE_0X62,
+    qt: int = UPZ_QUANT_QT55,
+) -> bytes:
+    r"""
+    Seal `(raw, packed)` polarimetric feature buffers into an exact 64-byte
+    `8b-is/upz` `LitanyWireFrame` at gate `0x62` with `BFP-64` bitplanes and `SPQT` root.
+    """
+    raw_fold = xor_fold_u64(raw)
+    packed_fold = xor_fold_u64(packed)
+    prefix26 = struct.pack(
+        "<QQIIBB",
+        raw_fold,
+        packed_fold,
+        len(raw) & 0xFFFFFFFF,
+        len(packed) & 0xFFFFFFFF,
+        gate & 0xFF,
+        UPZ_FRAME_ABI_V1,
+    )
+    tail6 = xor_fold_u64(prefix26).to_bytes(8, "little")[:6]
+    frame32 = prefix26 + tail6
+
+    comp_fold = raw_fold ^ packed_fold
+    mask = ((qt & 0xFF) * 0x0101010101010101) & 0xFFFFFFFFFFFFFFFF
+    bfp64_pos = comp_fold & mask
+    bfp64_neg = comp_fold & (~mask & 0xFFFFFFFFFFFFFFFF)
+    ratio = RationalPQ(len(raw), max(len(packed), 1)).reduced()
+    spqt = pack_word15_to_spqt3b(comp_fold & 0x7FFF)
+
+    wire62 = (
+        frame32
+        + struct.pack("<QQII", bfp64_pos, bfp64_neg, ratio.p & 0xFFFFFFFF, ratio.q & 0xFFFFFFFF)
+        + spqt
+        + struct.pack("<BH", qt & 0xFF, UPZ_LANES_1_OF_1)
+    )
+    seal16 = xor_fold_u64(wire62) & 0xFFFF
+    return wire62 + struct.pack("<H", seal16)
+
+
+def verify_polar_litany_wire_64b(
+    wire: bytes,
+    raw: bytes,
+    packed: bytes,
+    gate: int = UPZ_GATE_0X62,
+    qt: int = UPZ_QUANT_QT55,
+) -> bool:
+    r"""Verify a 64-byte `LitanyWireFrame` in constant shape."""
+    if len(wire) != 64:
+        return False
+    bfp64_pos, bfp64_neg = struct.unpack("<QQ", wire[32:48])
+    if (bfp64_pos & bfp64_neg) != 0:
+        return False
+    expected = seal_polar_litany_wire_64b(raw, packed, gate=gate, qt=qt)
+    diff = 0
+    for a, b in zip(wire, expected):
+        diff |= a ^ b
+    return diff == 0
+
+
+# ============================================================================
 # 6. PyTorch Singularity-Free Helper (Drop-In for `util/polarutils_torch.py`)
 # ============================================================================
 
@@ -783,6 +960,33 @@ class TestLaserPhoenixPolarLatticePq(unittest.TestCase):
         ap, an = pack_trits_u64(a_trits)
         expected = sum(w * a for w, a in zip(w_trits, a_trits))
         self.assertEqual(quantum_trit_dot_q16(wp, wn, ap, an), expected)
+
+    def test_upz_litany_wire_64b_and_mlx_quant_groupwise(self) -> None:
+        # 1. MLX-QUANT-GAIA zero-float L2 groupwise ternary quantizer
+        weights_q16 = [65536, -65536, 2048, 58982, -62259, 0, 61000, -59000]
+        trits, scale_pq = quantize_groupwise_l2_ternary_pq(weights_q16)
+        self.assertEqual(trits, (1, -1, 0, 1, -1, 0, 1, -1))
+        self.assertGreater(scale_pq.p, 0)
+        self.assertGreater(scale_pq.q, 0)
+
+        # 2. "Where Is The Love?" (Elephunk, 2003) 6-register ternary signal -> SPQT base-243
+        witl_spqt = pack_gaia_b158_spqt(WHERE_IS_THE_LOVE_TRITS)
+        self.assertEqual(len(witl_spqt), 2)
+        self.assertEqual(witl_spqt[0], 161)  # 0xA1
+
+        # 3. 64-byte LitanyWireFrame sealing at 0x62 gate (3761 / 3314 kompress-super-ultra ratio)
+        raw = b"\x48" * 3761
+        packed = b"\x20" * 3314
+        wire = seal_polar_litany_wire_64b(raw, packed)
+        self.assertEqual(len(wire), 64)
+        self.assertEqual(wire[24], UPZ_GATE_0X62)
+        ratio_p, ratio_q = struct.unpack("<II", wire[48:56])
+        self.assertEqual((ratio_p, ratio_q), (3761, 3314))
+        self.assertTrue(verify_polar_litany_wire_64b(wire, raw, packed))
+
+        tampered = bytearray(wire)
+        tampered[63] ^= 0x01
+        self.assertFalse(verify_polar_litany_wire_64b(bytes(tampered), raw, packed))
 
 
 if __name__ == "__main__":
